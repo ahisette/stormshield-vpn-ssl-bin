@@ -1,0 +1,48 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: detect-private-key
+
+  - repo: https://github.com/editorconfig-checker/editorconfig-checker.python
+    rev: 3.11.1
+    hooks:
+      - id: editorconfig-checker
+
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+
+  - repo: local
+    hooks:
+      - id: check-srcinfo
+        name: check .SRCINFO synchronization
+        entry: >-
+          bash -c 'cmp -s .SRCINFO <(makepkg --printsrcinfo) || { echo "ERROR: .SRCINFO is out of sync with PKGBUILD. Run: makepkg --printsrcinfo > .SRCINFO"; exit 1; }'
+        language: system
+        files: ^(PKGBUILD|\.SRCINFO)$
+        pass_filenames: false
+
+      - id: namcap-pkgbuild
+        name: namcap PKGBUILD check
+        entry: namcap
+        language: system
+        files: ^PKGBUILD$
+
+      - id: shellcheck-install
+        name: shellcheck install script
+        entry: shellcheck --shell=bash
+        language: system
+        files: \.install$
+
+      - id: systemd-analyze
+        name: systemd-analyze verify
+        entry: systemd-analyze verify
+        language: system
+        files: \.service$
