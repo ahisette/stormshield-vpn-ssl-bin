@@ -1,0 +1,16 @@
+[Unit]
+Description=Stormshield SSL VPN Service Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Environment=DOTNET_EnableDiagnostics=0
+WorkingDirectory=/opt/stormshield/sslvpnclient/Modules/ssl-vpn/Services/
+ExecStart=/opt/stormshield/sslvpnclient/Modules/ssl-vpn/Services/SSLVPNService
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+Alias=sslvpn-module.service

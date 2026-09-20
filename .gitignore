@@ -1,0 +1,13 @@
+# Arch Linux / makepkg build artifacts
+*.pkg.tar.*
+*.deb
+/src/
+/pkg/
+
+# Makepkg temporary and log files
+*.log
+*.log.*
+*.sig
+
+# Local work and temporary dumps
+lst-files.txt

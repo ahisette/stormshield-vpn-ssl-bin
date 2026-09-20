@@ -1,0 +1,10 @@
+post_install() {
+  echo ":: To use the Stormshield SSL VPN client, enable and start the service daemon:"
+  echo "::   sudo systemctl enable --now stormshield-vpn-ssl.service"
+}
+
+post_upgrade() {
+  echo ":: If the Stormshield SSL VPN service was running, reload and restart it:"
+  echo "::   sudo systemctl daemon-reload"
+  echo "::   sudo systemctl try-restart stormshield-vpn-ssl.service"
+}
