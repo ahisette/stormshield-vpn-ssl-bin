@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'README.md'
+      - 'LICENSE'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and packaging checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate YAML and formatting
+        run: |
+          ruby -ryaml -e '
+            Dir.glob([".github/**/*.yml", ".pre-commit-config.yaml"]).each do |path|
+              content = File.read(path, encoding: "UTF-8")
+              YAML.safe_load(content)
+              abort("#{path}: missing final newline") unless content.end_with?("\n")
+              content.each_line.with_index(1) do |line, idx|
+                abort("#{path}:#{idx}: trailing whitespace") if line.chomp.match?(/[ \t]$/)
+                abort("#{path}:#{idx}: tab indentation") if line.include?("\t")
+              end
+              puts "OK: #{path}"
+            end
+          '
+
+      - name: Run actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint"
+
+      - name: Check PKGBUILD, .SRCINFO and install script
+        run: |
+          docker run --rm \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            archlinux:base-devel \
+            bash -euo pipefail -c '
+              pacman -Syu --noconfirm --needed namcap shellcheck >/dev/null
+              cp -r /work /tmp/pkg
+              chown -R nobody:nobody /tmp/pkg
+              generated=$(runuser -u nobody -- env HOME=/tmp bash -c "cd /tmp/pkg && makepkg --printsrcinfo")
+              diff -u /work/.SRCINFO <(printf "%s\n" "$generated")
+              namcap /work/PKGBUILD
+              shellcheck --shell=bash /work/stormshield-vpn-ssl-bin.install
+            '
