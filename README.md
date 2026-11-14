@@ -33,6 +33,26 @@ Follow these steps to build and install the package:
    makepkg -si
    ```
 
+## Upstream Update Checks
+
+The [Check upstream version](.github/workflows/check-upstream-version.yml) workflow
+checks the official Stormshield download page daily at 07:23 UTC. When a newer
+upstream version is available, it downloads the Debian installer, computes its
+SHA256, updates `PKGBUILD` and `.SRCINFO` on a `chore/pkg-update-<version>` branch,
+and opens a pull request assigned to the repository owner. Existing pull requests
+(including closed ones) prevent duplicate PRs.
+
+You can also run it from **Actions > Check upstream version > Run workflow**.
+The workflow must be published on the default branch, GitHub Actions must be
+enabled, and **Allow GitHub Actions to create and approve pull requests** must be
+enabled in **Settings > Actions > General**. It uses the automatic `GITHUB_TOKEN`;
+no additional secret is needed.
+
+Each run includes a version comparison in its summary. A download failure or an
+unrecognized version makes the run fail rather than reporting the package as
+up to date. If Stormshield changes its download page structure, the version
+extraction may need updating.
+
 ## Service Configuration
 
 The client requires a background daemon to manage VPN tunnels.

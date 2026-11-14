@@ -1,0 +1,294 @@
+name: Check upstream version
+
+on:
+  schedule:
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-upstream-version
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check Stormshield version and download installer
+        id: check
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const crypto = require('node:crypto');
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const {Readable} = require('node:stream');
+            const {pipeline} = require('node:stream/promises');
+
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const fetchWithRetry = async (url, timeoutMs) => {
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                  const response = await fetch(url, {
+                    signal: AbortSignal.timeout(timeoutMs),
+                  });
+                  if (!response.ok) {
+                    const err = new Error(`Request to ${url} returned HTTP ${response.status}`);
+                    err.retryable = response.status === 429 || response.status >= 500;
+                    throw err;
+                  }
+                  return response;
+                } catch (error) {
+                  if (attempt === 3 || error.retryable === false) throw error;
+                  core.warning(`Attempt ${attempt} failed for ${url}: ${error.message}`);
+                  await sleep(attempt * 2000);
+                }
+              }
+            };
+
+            const pkgbuild = fs.readFileSync('PKGBUILD', 'utf8');
+            const current = pkgbuild.match(/^pkgver=(\d+(?:\.\d+)+)\s*$/m)?.[1];
+            if (!current) {
+              throw new Error('Cannot read a numeric pkgver from PKGBUILD');
+            }
+
+            // The official download page uses this file to select its installers.
+            const source = 'https://vpn.stormshield.eu/js/app.js';
+            const scriptResponse = await fetchWithRetry(source, 30000);
+            const upstreamScript = await scriptResponse.text();
+
+            const latest = upstreamScript.match(
+              /\bconst\s+currentVersion\s*=\s*["'](\d+(?:\.\d+)+)["']/
+            )?.[1];
+            if (!latest) {
+              throw new Error('Cannot read currentVersion from the official download script');
+            }
+
+            // Compare numeric components: 5.1.10 is newer than 5.1.9.
+            const localParts = current.split('.').map(Number);
+            const latestParts = latest.split('.').map(Number);
+            let comparison = 0;
+            for (let i = 0; i < Math.max(localParts.length, latestParts.length); i++) {
+              comparison = (latestParts[i] ?? 0) - (localParts[i] ?? 0);
+              if (comparison !== 0) break;
+            }
+            const updateAvailable = comparison > 0;
+            core.info(`Packaged: ${current}; upstream: ${latest}`);
+
+            const summary = core.summary
+              .addHeading('Stormshield SSL VPN version check')
+              .addTable([
+                [{data: 'Packaged version', header: true}, {data: 'Upstream version', header: true}],
+                [current, latest],
+              ]);
+
+            if (!updateAvailable) {
+              await summary.addRaw('No newer upstream version is available.').write();
+              core.setOutput('update_available', 'false');
+              return;
+            }
+
+            const branch = `chore/pkg-update-${latest}`;
+            const prTitle = `chore(pkg): update stormshield-vpn-ssl-bin to ${latest}`;
+
+            // Include closed PRs so dismissing an update does not recreate it daily.
+            for await (const page of github.paginate.iterator(github.rest.pulls.list, {
+              ...context.repo,
+              state: 'all',
+              per_page: 100,
+            })) {
+              const existing = page.data.find(
+                (pr) =>
+                  pr.head?.ref === branch ||
+                  (pr.user?.login === 'github-actions[bot]' && pr.title === prTitle)
+              );
+              if (existing) {
+                core.info(`A pull request already exists for version ${latest}: ${existing.html_url}`);
+                await summary
+                  .addRaw(`An update PR already exists for ${latest}: #${existing.number}.`)
+                  .write();
+                core.setOutput('update_available', 'false');
+                return;
+              }
+            }
+
+            const download = `https://vpn.stormshield.eu/download/sslvpnclient-x64-${latest}.deb`;
+            const debPath = path.join(process.env.RUNNER_TEMP, `sslvpnclient-x64-${latest}.deb`);
+
+            let sha256;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                const response = await fetch(download, {
+                  signal: AbortSignal.timeout(120000),
+                });
+                if (!response.ok) {
+                  const err = new Error(`Installer download returned HTTP ${response.status}`);
+                  err.retryable = response.status === 429 || response.status >= 500;
+                  throw err;
+                }
+                if (!response.body) {
+                  throw new Error('Installer download response has no body');
+                }
+                const hash = crypto.createHash('sha256');
+                const fileStream = fs.createWriteStream(debPath);
+                const bodyStream = Readable.fromWeb(response.body);
+                bodyStream.on('data', (chunk) => hash.update(chunk));
+                await pipeline(bodyStream, fileStream);
+                sha256 = hash.digest('hex');
+                break;
+              } catch (error) {
+                if (attempt === 3 || error.retryable === false) throw error;
+                core.warning(`Installer download attempt ${attempt} failed: ${error.message}`);
+                await sleep(attempt * 2000);
+              }
+            }
+
+            await summary.addRaw(`Update available: preparing PR for ${latest}.`).write();
+
+            core.setOutput('update_available', 'true');
+            core.setOutput('current_version', current);
+            core.setOutput('latest_version', latest);
+            core.setOutput('branch_name', branch);
+            core.setOutput('pr_title', prTitle);
+            core.setOutput('deb_path', debPath);
+            core.setOutput('deb_sha256', sha256);
+            core.setOutput('download_url', download);
+
+      - name: Verify Debian installer archive
+        if: steps.check.outputs.update_available == 'true'
+        env:
+          DEB_PATH: ${{ steps.check.outputs.deb_path }}
+        run: dpkg-deb --info "$DEB_PATH"
+
+      - name: Update PKGBUILD and .SRCINFO
+        if: steps.check.outputs.update_available == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          LATEST_VERSION: ${{ steps.check.outputs.latest_version }}
+          DEB_SHA256: ${{ steps.check.outputs.deb_sha256 }}
+          DOWNLOAD_URL: ${{ steps.check.outputs.download_url }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const {
+              LATEST_VERSION: latest,
+              DEB_SHA256: sha256,
+              DOWNLOAD_URL: download,
+            } = process.env;
+
+            const replaceExactOnce = (content, pattern, replacement, label) => {
+              const matches = content.match(new RegExp(pattern.source, `${pattern.flags.replace('g', '')}g`));
+              if (!matches || matches.length !== 1) {
+                throw new Error(`Expected exactly 1 match for ${label}, found ${matches ? matches.length : 0}`);
+              }
+              return content.replace(pattern, replacement);
+            };
+
+            let pkgbuild = fs.readFileSync('PKGBUILD', 'utf8');
+            pkgbuild = replaceExactOnce(pkgbuild, /^pkgver=.*$/m, `pkgver=${latest}`, 'PKGBUILD pkgver');
+            pkgbuild = replaceExactOnce(pkgbuild, /^pkgrel=.*$/m, 'pkgrel=1', 'PKGBUILD pkgrel');
+            pkgbuild = replaceExactOnce(
+              pkgbuild,
+              /^(sha256sums=\(\r?\n\s*['"])[0-9a-f]{64}(['"])/m,
+              `$1${sha256}$2`,
+              'PKGBUILD first sha256sum'
+            );
+            fs.writeFileSync('PKGBUILD', pkgbuild, 'utf8');
+
+            let srcinfo = fs.readFileSync('.SRCINFO', 'utf8');
+            srcinfo = replaceExactOnce(srcinfo, /^\tpkgver = .*$/m, `\tpkgver = ${latest}`, '.SRCINFO pkgver');
+            srcinfo = replaceExactOnce(srcinfo, /^\tpkgrel = .*$/m, '\tpkgrel = 1', '.SRCINFO pkgrel');
+            srcinfo = replaceExactOnce(
+              srcinfo,
+              /^\tsource = https:\/\/vpn\.stormshield\.eu\/download\/sslvpnclient-x64-.*\.deb$/m,
+              `\tsource = ${download}`,
+              '.SRCINFO deb source'
+            );
+            // Only replace the first sha256sums entry (the .deb installer).
+            if (!/^\tsha256sums = [0-9a-f]{64}$/m.test(srcinfo)) {
+              throw new Error('Cannot find .SRCINFO sha256sums entry');
+            }
+            srcinfo = srcinfo.replace(/^\tsha256sums = [0-9a-f]{64}$/m, `\tsha256sums = ${sha256}`);
+            fs.writeFileSync('.SRCINFO', srcinfo, 'utf8');
+
+      - name: Commit and push update branch
+        if: steps.check.outputs.update_available == 'true'
+        env:
+          BRANCH_NAME: ${{ steps.check.outputs.branch_name }}
+          LATEST_VERSION: ${{ steps.check.outputs.latest_version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$BRANCH_NAME"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "No packaging changes to commit"
+            exit 1
+          fi
+          git commit -m "chore(pkg): update to ${LATEST_VERSION}"
+          git push --force origin "HEAD:refs/heads/${BRANCH_NAME}"
+
+      - name: Create and assign pull request
+        if: steps.check.outputs.update_available == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CURRENT_VERSION: ${{ steps.check.outputs.current_version }}
+          LATEST_VERSION: ${{ steps.check.outputs.latest_version }}
+          BRANCH_NAME: ${{ steps.check.outputs.branch_name }}
+          PR_TITLE: ${{ steps.check.outputs.pr_title }}
+          DOWNLOAD_URL: ${{ steps.check.outputs.download_url }}
+          DEB_SHA256: ${{ steps.check.outputs.deb_sha256 }}
+        with:
+          script: |
+            const {
+              CURRENT_VERSION: current,
+              LATEST_VERSION: latest,
+              BRANCH_NAME: branch,
+              PR_TITLE: title,
+              DOWNLOAD_URL: download,
+              DEB_SHA256: sha256,
+            } = process.env;
+
+            const {data: repo} = await github.rest.repos.get(context.repo);
+            const body = [
+              `@${context.repo.owner} Stormshield offers version **${latest}**; this repository currently packages **${current}**.`,
+              '',
+              '### Changes',
+              `- Updated \`pkgver\` to \`${latest}\` and reset \`pkgrel\` to \`1\` in \`PKGBUILD\` and \`.SRCINFO\`.`,
+              `- Updated the Debian installer SHA256 to \`${sha256}\`.`,
+              '',
+              '### References',
+              '- [Official download page](https://vpn.stormshield.eu/)',
+              `- [Linux Debian installer](${download})`,
+              '- [Version source](https://vpn.stormshield.eu/js/app.js)',
+              '',
+              '### Before merging',
+              '1. Verify the SHA256 against the official download page if available.',
+              '2. Run `makepkg -si` locally to test building, installing and running the client.',
+            ].join('\n');
+
+            const {data: pr} = await github.rest.pulls.create({
+              ...context.repo,
+              title,
+              head: branch,
+              base: repo.default_branch,
+              body,
+            });
+
+            await github.rest.issues.addAssignees({
+              ...context.repo,
+              issue_number: pr.number,
+              assignees: [context.repo.owner],
+            });
+
+            core.notice(`Pull request created: ${pr.html_url}`);
