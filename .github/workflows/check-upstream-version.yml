@@ -23,12 +23,19 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.PR_TOKEN || github.token }}
 
       - name: Check Stormshield version and download installer
         id: check
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          HAS_PR_TOKEN: ${{ secrets.PR_TOKEN != '' }}
         with:
           script: |
+            if (process.env.HAS_PR_TOKEN !== 'true') {
+              core.warning('PR_TOKEN secret is not set; falling back to GITHUB_TOKEN (created PRs will not trigger CI workflows).');
+            }
             const crypto = require('node:crypto');
             const fs = require('node:fs');
             const path = require('node:path');
@@ -110,7 +117,8 @@ jobs:
               const existing = page.data.find(
                 (pr) =>
                   pr.head?.ref === branch ||
-                  (pr.user?.login === 'github-actions[bot]' && pr.title === prTitle)
+                  ((pr.user?.login === 'github-actions[bot]' || pr.user?.login === context.repo.owner) &&
+                    pr.title === prTitle)
               );
               if (existing) {
                 core.info(`A pull request already exists for version ${latest}: ${existing.html_url}`);
@@ -249,6 +257,7 @@ jobs:
           DOWNLOAD_URL: ${{ steps.check.outputs.download_url }}
           DEB_SHA256: ${{ steps.check.outputs.deb_sha256 }}
         with:
+          github-token: ${{ secrets.PR_TOKEN || github.token }}
           script: |
             const {
               CURRENT_VERSION: current,
